@@ -96,24 +96,7 @@ mod tests {
     const TEST_DATA: &[u8] = b"I am the wal.rs";
 
     #[test]
-    fn test_append() -> std::io::Result<()> {
-        let temp_file = NamedTempFile::new()?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(temp_file.path())?;
-
-        let store = Store::new(file)?;
-
-        let (bytes_written, pos) = store.append(TEST_DATA)?;
-        assert_eq!(bytes_written, TEST_DATA.len() as u64 + LEN_SIZE as u64);
-        assert_eq!(pos, 0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_read() -> std::io::Result<()> {
+    fn test_store_append_and_read() -> std::io::Result<()> {
         let temp_file = NamedTempFile::new()?;
         let file = OpenOptions::new()
             .read(true)
@@ -123,7 +106,10 @@ mod tests {
         let store = Store::new(file)?;
 
         // Append data to the store.
-        let (_, pos) = store.append(TEST_DATA)?;
+        let (bytes_written, pos) = store.append(TEST_DATA)?;
+        assert_eq!(bytes_written, TEST_DATA.len() as u64 + LEN_SIZE as u64);
+        assert_eq!(pos, 0);
+
         // Read the data back.
         let data = store.read(pos)?;
         assert_eq!(data, TEST_DATA);
