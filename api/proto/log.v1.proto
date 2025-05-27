@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package log.v1;
+
+// LogService is a service for writing and reading records to/from the log.
+service LogService {
+    // Produce a record to the log.
+    rpc Produce(ProduceRequest) returns (ProduceResponse) {}
+    // Consume a record from the log.
+    rpc Consume(ConsumeRequest) returns (ConsumeResponse) {}
+    // Produce a stream of records to the log.
+    rpc ProduceStream(stream ProduceRequest) returns (stream ProduceResponse) {}
+    // Consume a stream of records from the log.
+    rpc ConsumeStream(ConsumeRequest) returns (stream ConsumeResponse) {}
+}
+
+// Record represents a single log entry with an offset and value.
+message Record {
+    uint64 offset = 1;
+    bytes value = 2;
+}
+
+// Request message for Produce.
+message ProduceRequest {
+    Record record = 1;
+}
+
+// Response message for Produce.
+message ProduceResponse {
+    uint64 offset = 1;
+}
+
+// Request message for Consume.
+message ConsumeRequest {
+    uint64 offset = 1;
+}
+
+// Response message for Consume.
+message ConsumeResponse {
+    Record record = 1;
+}
