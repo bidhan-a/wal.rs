@@ -120,3 +120,44 @@ impl Segment {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use api::Record;
+
+    #[test]
+    fn test_segment() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+
+        // Create test records.
+        let record_1 = Record {
+            offset: None,
+            value: b"record_1".to_vec(),
+        };
+        let record_2 = Record {
+            offset: None,
+            value: b"record_2".to_vec(),
+        };
+
+        // Create a new segment.
+        let mut segment = Segment::new(dir.path(), 100)?;
+
+        // Append the records.
+        let offset = segment.append(&record_1)?;
+        assert_eq!(offset, 100);
+        let offset = segment.append(&record_2)?;
+        assert_eq!(offset, 101);
+
+        // Read the records back.
+        let read_record = segment.read(100)?;
+        assert_eq!(read_record.value, b"record_1".to_vec());
+        let read_record = segment.read(101)?;
+        assert_eq!(read_record.value, b"record_2".to_vec());
+
+        // Clean up.
+        segment.remove()?;
+
+        Ok(())
+    }
+}

@@ -16,7 +16,7 @@ service LogService {
 
 // Record represents a single log entry with an offset and value.
 message Record {
-    uint64 offset = 1;
+    optional uint64 offset = 1;
     bytes value = 2;
 }
 
