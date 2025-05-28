@@ -103,6 +103,14 @@ impl Segment {
         Ok(record)
     }
 
+    /// Check if the segment contains the provided offset.
+    pub fn contains(&self, offset: u64) -> bool {
+        if self.base_offset <= offset && offset < self.next_offset {
+            return true;
+        }
+        false
+    }
+
     pub fn close(&self) -> std::io::Result<()> {
         self.index.close()?;
         self.store.close()?;
@@ -127,7 +135,7 @@ mod tests {
     use api::Record;
 
     #[test]
-    fn test_segment() -> std::io::Result<()> {
+    fn test_segment_append_and_read() -> std::io::Result<()> {
         let dir = tempfile::tempdir()?;
 
         // Create test records.

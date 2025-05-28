@@ -89,8 +89,6 @@ impl Index {
         let offset = BigEndian::read_u32(&self.mmap[start..start + OFFSET_SIZE]);
         let position = BigEndian::read_u64(&self.mmap[start + OFFSET_SIZE..start + ENTRY_SIZE]);
 
-        println!("{} - {}", entry_offset, offset);
-
         Ok(IndexEntry { offset, position })
     }
 
