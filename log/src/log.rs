@@ -5,7 +5,10 @@ use std::{
 
 use api::Record;
 
-use crate::segment::{self, Segment};
+use crate::{
+    error::{LogError, LogResult},
+    segment::Segment,
+};
 
 pub struct Log {
     inner: Arc<Mutex<LogInner>>,
@@ -18,7 +21,7 @@ struct LogInner {
 }
 
 impl Log {
-    pub fn new<P: AsRef<Path>>(dir: P) -> std::io::Result<Self> {
+    pub fn new<P: AsRef<Path>>(dir: P) -> LogResult<Self> {
         let log = Self {
             inner: Arc::new(Mutex::new(LogInner {
                 dir: dir.as_ref().to_path_buf(),
@@ -30,7 +33,7 @@ impl Log {
         Ok(log)
     }
 
-    pub fn append(&mut self, record: &Record) -> std::io::Result<u64> {
+    pub fn append(&mut self, record: &Record) -> LogResult<u64> {
         let mut inner = self.inner.lock().unwrap();
 
         let current_segment_index = inner.current_segment_index.unwrap();
@@ -42,7 +45,7 @@ impl Log {
         Ok(offset)
     }
 
-    pub fn read(&self, offset: u64) -> std::io::Result<Record> {
+    pub fn read(&self, offset: u64) -> LogResult<Record> {
         let inner = self.inner.lock().unwrap();
 
         // Find the correct segment where the offset is present.
@@ -51,15 +54,13 @@ impl Log {
             .segments
             .iter()
             .find(|s| s.contains(offset))
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "Offset is out of range")
-            })?;
+            .ok_or_else(|| LogError::InvalidOffsetError)?;
         let record = segment.read(offset)?;
 
         Ok(record)
     }
 
-    pub fn close(&self) -> std::io::Result<()> {
+    pub fn close(&self) -> LogResult<()> {
         let inner = self.inner.lock().unwrap();
 
         for segment in &inner.segments {
@@ -69,7 +70,7 @@ impl Log {
         Ok(())
     }
 
-    pub fn remove(&self) -> std::io::Result<()> {
+    pub fn remove(&self) -> LogResult<()> {
         let dir = {
             let inner = self.inner.lock().unwrap();
             inner.dir.clone()
@@ -81,13 +82,13 @@ impl Log {
         Ok(())
     }
 
-    pub fn reset(&self) -> std::io::Result<()> {
+    pub fn reset(&self) -> LogResult<()> {
         self.remove()?;
         self.setup()?;
         Ok(())
     }
 
-    fn setup(&self) -> std::io::Result<()> {
+    fn setup(&self) -> LogResult<()> {
         let mut inner = self.inner.lock().unwrap();
 
         let entries = std::fs::read_dir(&inner.dir)?;
@@ -127,7 +128,7 @@ impl Log {
 }
 
 impl LogInner {
-    fn create_segment(&mut self, offset: u64) -> std::io::Result<()> {
+    fn create_segment(&mut self, offset: u64) -> LogResult<()> {
         let segment = Segment::new(&self.dir, offset)?;
         self.segments.push(segment);
         self.current_segment_index = Some(self.segments.len() - 1);
@@ -141,7 +142,7 @@ mod tests {
     use api::Record;
 
     #[test]
-    fn test_log_append_and_read() -> std::io::Result<()> {
+    fn test_log_append_and_read() -> LogResult<()> {
         let dir = tempfile::tempdir()?;
         println!("{:?}", dir.path());
 

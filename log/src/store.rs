@@ -5,6 +5,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::error::LogResult;
+
 const LEN_SIZE: usize = 8; // Size of the length prefix in bytes
 
 pub struct Store {
@@ -18,7 +20,7 @@ struct StoreInner {
 }
 
 impl Store {
-    pub fn new(file: File) -> std::io::Result<Self> {
+    pub fn new(file: File) -> LogResult<Self> {
         let metadata = file.metadata()?;
         let size = metadata.len();
 
@@ -30,7 +32,7 @@ impl Store {
         })
     }
 
-    pub fn append(&self, data: &[u8]) -> std::io::Result<(u64, u64)> {
+    pub fn append(&self, data: &[u8]) -> LogResult<(u64, u64)> {
         let mut inner = self.inner.lock().unwrap();
 
         // The position where we'll begin writing from.
@@ -48,7 +50,7 @@ impl Store {
         Ok((total_bytes_written as u64, pos))
     }
 
-    pub fn read(&self, pos: u64) -> std::io::Result<Vec<u8>> {
+    pub fn read(&self, pos: u64) -> LogResult<Vec<u8>> {
         let mut inner = self.inner.lock().unwrap();
 
         // First, flush the buffer to make sure all data is written to the file.
@@ -69,7 +71,7 @@ impl Store {
         Ok(data)
     }
 
-    pub fn close(&self) -> std::io::Result<()> {
+    pub fn close(&self) -> LogResult<()> {
         let mut inner = self.inner.lock().unwrap();
 
         // Flush any remaining data in the buffer.
@@ -96,7 +98,7 @@ mod tests {
     const TEST_DATA: &[u8] = b"I am the wal.rs";
 
     #[test]
-    fn test_store_append_and_read() -> std::io::Result<()> {
+    fn test_store_append_and_read() -> LogResult<()> {
         let temp_file = NamedTempFile::new()?;
         let file = OpenOptions::new()
             .read(true)

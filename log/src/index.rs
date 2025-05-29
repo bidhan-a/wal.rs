@@ -2,6 +2,8 @@ use byteorder::{BigEndian, ByteOrder};
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::File;
 
+use crate::error::{LogError, LogResult};
+
 // TODO: Store this in a config.
 const MAX_INDEX_SIZE: usize = 1024; // Maximum size of the index in bytes.
 
@@ -22,7 +24,7 @@ pub struct IndexEntry {
 }
 
 impl Index {
-    pub fn new(file: File) -> std::io::Result<Self> {
+    pub fn new(file: File) -> LogResult<Self> {
         let metadata = file.metadata()?;
         let size = metadata.len();
 
@@ -35,13 +37,10 @@ impl Index {
         Ok(Self { file, mmap, size })
     }
 
-    pub fn write(&mut self, offset: u32, position: u64) -> std::io::Result<()> {
+    pub fn write(&mut self, offset: u32, position: u64) -> LogResult<()> {
         // Check if the index is full.
         if self.mmap.len() < (self.size as usize + ENTRY_SIZE) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "Index is full",
-            ));
+            return Err(LogError::IndexFullError);
         }
 
         // Get the start position for the new entry.
@@ -62,12 +61,9 @@ impl Index {
         Ok(())
     }
 
-    pub fn read(&self, offset: Option<u32>) -> std::io::Result<IndexEntry> {
+    pub fn read(&self, offset: Option<u32>) -> LogResult<IndexEntry> {
         if self.size == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "Index is empty",
-            ));
+            return Err(LogError::IndexEmptyError);
         }
 
         let entry_offset = match offset {
@@ -77,10 +73,7 @@ impl Index {
 
         let byte_pos = (entry_offset as u64) * ENTRY_SIZE as u64;
         if self.size < byte_pos + ENTRY_SIZE as u64 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "Index entry out of bounds",
-            ));
+            return Err(LogError::IndexEntryOutOfBoundsError);
         }
 
         let start = byte_pos as usize;
@@ -92,15 +85,15 @@ impl Index {
         Ok(IndexEntry { offset, position })
     }
 
-    pub fn read_at(&self, offset: u32) -> std::io::Result<IndexEntry> {
+    pub fn read_at(&self, offset: u32) -> LogResult<IndexEntry> {
         self.read(Some(offset))
     }
 
-    pub fn read_last(&self) -> std::io::Result<IndexEntry> {
+    pub fn read_last(&self) -> LogResult<IndexEntry> {
         self.read(None)
     }
 
-    pub fn close(&self) -> std::io::Result<()> {
+    pub fn close(&self) -> LogResult<()> {
         // Flush the mmap to disk.
         self.mmap.flush()?;
 
@@ -129,7 +122,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_index_write_and_read() -> std::io::Result<()> {
+    fn test_index_write_and_read() -> LogResult<()> {
         let temp_file = NamedTempFile::new()?;
         let file = OpenOptions::new()
             .read(true)

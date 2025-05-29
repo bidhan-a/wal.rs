@@ -6,7 +6,11 @@ use std::{
 
 use api::Record;
 
-use crate::{index::Index, store::Store};
+use crate::{
+    error::{LogError, LogResult},
+    index::Index,
+    store::Store,
+};
 
 pub struct Segment {
     store: Store,
@@ -18,7 +22,7 @@ pub struct Segment {
 }
 
 impl Segment {
-    pub fn new<P: AsRef<Path>>(dir: P, base_offset: u64) -> std::io::Result<Self> {
+    pub fn new<P: AsRef<Path>>(dir: P, base_offset: u64) -> LogResult<Self> {
         let dir = dir.as_ref();
 
         // Setup store.
@@ -58,9 +62,11 @@ impl Segment {
         })
     }
 
-    pub fn append(&mut self, record: &Record) -> std::io::Result<u64> {
+    pub fn append(&mut self, record: &Record) -> LogResult<u64> {
         let mut buf = Vec::new();
-        record.encode(&mut buf)?;
+        record
+            .encode(&mut buf)
+            .map_err(|_| LogError::InvalidRecordError)?;
 
         // Append record to the store.
         let (_, position) = self.store.append(&buf)?;
@@ -81,13 +87,11 @@ impl Segment {
         Ok(current_offset)
     }
 
-    pub fn read(&self, offset: u64) -> std::io::Result<Record> {
+    pub fn read(&self, offset: u64) -> LogResult<Record> {
         // Get the relative index offset by subtracting base offset from offset.
         if offset < self.base_offset {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Offset is less than base offset",
-            ));
+            // Offset can't be less than the base offset.
+            return Err(LogError::InvalidOffsetError);
         }
         let relative_offset = offset - self.base_offset;
 
@@ -98,7 +102,7 @@ impl Segment {
         let record_bytes = self.store.read(entry.position)?;
 
         // Decode the record.
-        let record = Record::decode(&record_bytes[..])?;
+        let record = Record::decode(&record_bytes[..]).map_err(|_| LogError::InvalidRecordError)?;
 
         Ok(record)
     }
@@ -111,13 +115,13 @@ impl Segment {
         false
     }
 
-    pub fn close(&self) -> std::io::Result<()> {
+    pub fn close(&self) -> LogResult<()> {
         self.index.close()?;
         self.store.close()?;
         Ok(())
     }
 
-    pub fn remove(self) -> std::io::Result<()> {
+    pub fn remove(self) -> LogResult<()> {
         // Close the segment.
         self.close()?;
 
@@ -135,7 +139,7 @@ mod tests {
     use api::Record;
 
     #[test]
-    fn test_segment_append_and_read() -> std::io::Result<()> {
+    fn test_segment_append_and_read() -> LogResult<()> {
         let dir = tempfile::tempdir()?;
 
         // Create test records.
