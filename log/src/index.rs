@@ -4,9 +4,6 @@ use std::fs::File;
 
 use crate::error::{LogError, LogResult};
 
-// TODO: Store this in a config.
-const MAX_INDEX_SIZE: usize = 1024; // Maximum size of the index in bytes.
-
 const OFFSET_SIZE: usize = 4; // Size of the offset in bytes (u32).
 const POSITION_SIZE: usize = 8; // Size of the position in bytes (u64).
 const ENTRY_SIZE: usize = OFFSET_SIZE + POSITION_SIZE; // Size of each index entry in bytes.
@@ -24,15 +21,19 @@ pub struct IndexEntry {
 }
 
 impl Index {
-    pub fn new(file: File) -> LogResult<Self> {
+    pub fn new(file: File, max_index_size: u64) -> LogResult<Self> {
         let metadata = file.metadata()?;
         let size = metadata.len();
 
         // Truncate file to max index size.
-        file.set_len(MAX_INDEX_SIZE as u64)?;
+        file.set_len(max_index_size)?;
 
         // Create a memory-mapped file.
-        let mmap = unsafe { MmapOptions::new().len(MAX_INDEX_SIZE).map_mut(&file)? };
+        let mmap = unsafe {
+            MmapOptions::new()
+                .len(max_index_size as usize)
+                .map_mut(&file)?
+        };
 
         Ok(Self { file, mmap, size })
     }
@@ -93,6 +94,10 @@ impl Index {
         self.read(None)
     }
 
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
     pub fn close(&self) -> LogResult<()> {
         // Flush the mmap to disk.
         self.mmap.flush()?;
@@ -115,21 +120,20 @@ impl Drop for Index {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::OpenOptions;
-
-    use tempfile::NamedTempFile;
-
     use super::*;
+    use std::fs::OpenOptions;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_index_write_and_read() -> LogResult<()> {
+        let max_index_size = 1024;
         let temp_file = NamedTempFile::new()?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(temp_file.path())?;
 
-        let mut index = Index::new(file)?;
+        let mut index = Index::new(file, max_index_size)?;
 
         // Write some entries.
         index.write(0, 100)?;

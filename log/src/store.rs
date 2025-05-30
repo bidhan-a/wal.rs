@@ -71,6 +71,11 @@ impl Store {
         Ok(data)
     }
 
+    pub fn size(&self) -> u64 {
+        let inner = self.inner.lock().unwrap();
+        inner.size
+    }
+
     pub fn close(&self) -> LogResult<()> {
         let mut inner = self.inner.lock().unwrap();
 

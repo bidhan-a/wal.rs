@@ -1,3 +1,4 @@
+use cfg::Config;
 use prost::Message;
 use std::{
     fs::OpenOptions,
@@ -19,10 +20,11 @@ pub struct Segment {
     next_offset: u64,
     store_path: PathBuf,
     index_path: PathBuf,
+    config: Config,
 }
 
 impl Segment {
-    pub fn new<P: AsRef<Path>>(dir: P, base_offset: u64) -> LogResult<Self> {
+    pub fn new<P: AsRef<Path>>(dir: P, base_offset: u64, config: Config) -> LogResult<Self> {
         let dir = dir.as_ref();
 
         // Setup store.
@@ -44,7 +46,7 @@ impl Segment {
             .write(true)
             .create(true)
             .open(&index_path)?;
-        let index = Index::new(index_file)?;
+        let index = Index::new(index_file, config.log.segment.max_index_size)?;
 
         // Determine the next offset.
         let next_offset = match index.read_last() {
@@ -59,6 +61,7 @@ impl Segment {
             next_offset,
             store_path,
             index_path,
+            config,
         })
     }
 
@@ -115,6 +118,12 @@ impl Segment {
         false
     }
 
+    /// Check if the segment is maxed out.
+    pub fn is_maxed(&self) -> bool {
+        self.store.size() >= self.config.log.segment.max_store_size
+            || self.index.size() >= self.config.log.segment.max_index_size
+    }
+
     pub fn close(&self) -> LogResult<()> {
         self.index.close()?;
         self.store.close()?;
@@ -137,9 +146,19 @@ impl Segment {
 mod tests {
     use super::*;
     use api::Record;
+    use cfg::{LogConfig, SegmentConfig};
 
     #[test]
     fn test_segment_append_and_read() -> LogResult<()> {
+        let config: Config = Config {
+            log: LogConfig {
+                segment: SegmentConfig {
+                    max_store_size: 1024,
+                    max_index_size: 1024,
+                    initial_offset: 0,
+                },
+            },
+        };
         let dir = tempfile::tempdir()?;
 
         // Create test records.
@@ -153,18 +172,18 @@ mod tests {
         };
 
         // Create a new segment.
-        let mut segment = Segment::new(dir.path(), 100)?;
+        let mut segment = Segment::new(dir.path(), 10, config)?;
 
         // Append the records.
         let offset = segment.append(&record_1)?;
-        assert_eq!(offset, 100);
+        assert_eq!(offset, 10);
         let offset = segment.append(&record_2)?;
-        assert_eq!(offset, 101);
+        assert_eq!(offset, 11);
 
         // Read the records back.
-        let read_record = segment.read(100)?;
+        let read_record = segment.read(10)?;
         assert_eq!(read_record.value, b"record_1".to_vec());
-        let read_record = segment.read(101)?;
+        let read_record = segment.read(11)?;
         assert_eq!(read_record.value, b"record_2".to_vec());
 
         // Clean up.

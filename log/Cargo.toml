@@ -9,6 +9,7 @@ memmap2 = "0.9.5"
 api = { path = "../api" }
 prost = "0.13.5"
 thiserror = "2.0.12"
+cfg = { path = "../cfg" }
 
 [dev-dependencies]
 tempfile = "3.20.0"

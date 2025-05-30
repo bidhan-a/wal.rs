@@ -4,6 +4,7 @@ use std::{
 };
 
 use api::Record;
+use cfg::Config;
 
 use crate::{
     error::{LogError, LogResult},
@@ -18,15 +19,17 @@ struct LogInner {
     dir: PathBuf,
     segments: Vec<Segment>,
     current_segment_index: Option<usize>,
+    config: Config,
 }
 
 impl Log {
-    pub fn new<P: AsRef<Path>>(dir: P) -> LogResult<Self> {
+    pub fn new<P: AsRef<Path>>(dir: P, config: Config) -> LogResult<Self> {
         let log = Self {
             inner: Arc::new(Mutex::new(LogInner {
                 dir: dir.as_ref().to_path_buf(),
                 current_segment_index: None,
                 segments: Vec::new(),
+                config,
             })),
         };
         log.setup()?;
@@ -40,7 +43,10 @@ impl Log {
         let current_segment = &mut inner.segments[current_segment_index];
         let offset = current_segment.append(&record)?;
 
-        // TODO: If the current segment has reached its max size, create a new one.
+        // If the current segment has reached its max size, create a new one.
+        if current_segment.is_maxed() {
+            inner.create_segment(offset + 1)?;
+        }
 
         Ok(offset)
     }
@@ -120,7 +126,8 @@ impl Log {
 
         // Create initial segment if none exist.
         if inner.segments.is_empty() {
-            inner.create_segment(0)?; // TODO: store initial segment offset in config
+            let initial_offset = inner.config.log.segment.initial_offset;
+            inner.create_segment(initial_offset)?;
         }
 
         Ok(())
@@ -129,7 +136,7 @@ impl Log {
 
 impl LogInner {
     fn create_segment(&mut self, offset: u64) -> LogResult<()> {
-        let segment = Segment::new(&self.dir, offset)?;
+        let segment = Segment::new(&self.dir, offset, self.config)?;
         self.segments.push(segment);
         self.current_segment_index = Some(self.segments.len() - 1);
         Ok(())
@@ -140,11 +147,20 @@ impl LogInner {
 mod tests {
     use super::*;
     use api::Record;
+    use cfg::{LogConfig, SegmentConfig};
 
     #[test]
     fn test_log_append_and_read() -> LogResult<()> {
+        let config: Config = Config {
+            log: LogConfig {
+                segment: SegmentConfig {
+                    max_store_size: 1024,
+                    max_index_size: 1024,
+                    initial_offset: 0,
+                },
+            },
+        };
         let dir = tempfile::tempdir()?;
-        println!("{:?}", dir.path());
 
         // Create test records.
         let record_1 = Record {
@@ -157,7 +173,7 @@ mod tests {
         };
 
         // Create a new segment.
-        let mut log = Log::new(dir.path())?;
+        let mut log = Log::new(dir.path(), config)?;
 
         // Append the records.
         let offset = log.append(&record_1)?;
