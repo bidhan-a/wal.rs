@@ -66,6 +66,42 @@ impl Log {
         Ok(record)
     }
 
+    /// Get the lowest offset.
+    pub fn get_lowest_offset(&self) -> u64 {
+        let inner = self.inner.lock().unwrap();
+        inner.segments[0].base_offset
+    }
+
+    /// Get the highest offset.
+    pub fn get_highest_offset(&self) -> u64 {
+        let inner = self.inner.lock().unwrap();
+        let offset = inner.segments[inner.segments.len() - 1].next_offset;
+        if offset == 0 {
+            return 0;
+        }
+        return offset - 1;
+    }
+
+    /// Clean up all segments whose highest offset is lower than the cutoff offset.
+    /// This function will be called periodically to free up disk space by removing
+    /// old segments whose data has already been processed.
+    pub fn cleanup(&self, cutoff_offset: u64) -> LogResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+
+        let segments = std::mem::take(&mut inner.segments);
+        let mut segments_to_keep = Vec::with_capacity(segments.len());
+        for segment in segments {
+            if segment.next_offset < cutoff_offset {
+                segment.remove()?;
+            } else {
+                segments_to_keep.push(segment);
+            }
+        }
+        inner.segments = segments_to_keep;
+
+        Ok(())
+    }
+
     pub fn close(&self) -> LogResult<()> {
         let inner = self.inner.lock().unwrap();
 

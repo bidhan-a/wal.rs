@@ -13,11 +13,11 @@ use crate::{
     store::Store,
 };
 
-pub struct Segment {
+pub(crate) struct Segment {
     store: Store,
     index: Index,
-    base_offset: u64,
-    next_offset: u64,
+    pub base_offset: u64,
+    pub next_offset: u64,
     store_path: PathBuf,
     index_path: PathBuf,
     config: Config,
@@ -90,6 +90,7 @@ impl Segment {
         Ok(current_offset)
     }
 
+    /// Read the record at the provided offset.
     pub fn read(&self, offset: u64) -> LogResult<Record> {
         // Get the relative index offset by subtracting base offset from offset.
         if offset < self.base_offset {
