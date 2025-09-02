@@ -9,9 +9,9 @@ service LogService {
     // Consume a record from the log.
     rpc Consume(ConsumeRequest) returns (ConsumeResponse) {}
     // Produce a stream of records to the log.
-    rpc ProduceStream(stream ProduceRequest) returns (stream ProduceResponse) {}
+    // rpc ProduceStream(stream ProduceRequest) returns (stream ProduceResponse) {}
     // Consume a stream of records from the log.
-    rpc ConsumeStream(ConsumeRequest) returns (stream ConsumeResponse) {}
+    // rpc ConsumeStream(ConsumeRequest) returns (stream ConsumeResponse) {}
 }
 
 // Record represents a single log entry with an offset and value.
