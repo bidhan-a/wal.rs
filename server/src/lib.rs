@@ -1,12 +1,8 @@
+use log::log::Log;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use api::log_service_server::LogService;
-use api::log_service_server::LogServiceServer;
-use cfg::load_config;
-
-use log::log::Log;
-use tokio::sync::Mutex;
-use tonic::transport::Server;
 
 mod error;
 use error::ServiceError;
@@ -59,20 +55,4 @@ impl LogService for GrpcLogService {
         };
         Ok(tonic::Response::new(response))
     }
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // let config = load_config("config.yaml")?;
-    // let addr = "[::1]:50051".parse()?;
-    // let log = Log::new(config.log.dir.clone(), config.clone()).unwrap();
-    // let grpc_service = GrpcLogService::new(log);
-
-    // println!("Starting gRPC server..");
-    // Server::builder()
-    //     .add_service(LogServiceServer::new(grpc_service))
-    //     .serve(addr)
-    //     .await?;
-
-    Ok(())
 }
