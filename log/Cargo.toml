@@ -10,6 +10,9 @@ api = { path = "../api" }
 prost = "0.13.5"
 thiserror = "2.0.12"
 cfg = { path = "../cfg" }
+parking_lot = "0.12"
+tokio = { version = "1.0", features = ["sync", "rt"] }
+crossbeam-channel = "0.5"
 
 [dev-dependencies]
 tempfile = "3.20.0"

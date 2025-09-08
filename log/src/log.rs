@@ -1,6 +1,7 @@
+use parking_lot::RwLock;
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use api::Record;
@@ -12,7 +13,7 @@ use crate::{
 };
 
 pub struct Log {
-    inner: Arc<Mutex<LogInner>>,
+    inner: Arc<RwLock<LogInner>>,
 }
 
 struct LogInner {
@@ -25,7 +26,7 @@ struct LogInner {
 impl Log {
     pub fn new<P: AsRef<Path>>(dir: P, config: Config) -> LogResult<Self> {
         let log = Self {
-            inner: Arc::new(Mutex::new(LogInner {
+            inner: Arc::new(RwLock::new(LogInner {
                 dir: dir.as_ref().to_path_buf(),
                 current_segment_index: None,
                 segments: Vec::new(),
@@ -36,23 +37,31 @@ impl Log {
         Ok(log)
     }
 
-    pub fn append(&mut self, record: &Record) -> LogResult<u64> {
-        let mut inner = self.inner.lock().unwrap();
+    pub fn append(&self, record: &Record) -> LogResult<u64> {
+        // Use write lock for appends to handle mutable access to segments.
+        let mut inner = self.inner.write();
 
-        let current_segment_index = inner.current_segment_index.unwrap();
-        let current_segment = &mut inner.segments[current_segment_index];
-        let offset = current_segment.append(&record)?;
-
-        // If the current segment has reached its max size, create a new one.
-        if current_segment.is_maxed() {
-            inner.create_segment(offset + 1)?;
+        // Check if we need to create initial segment.
+        if inner.current_segment_index.is_none() {
+            let initial_offset = inner.config.log.segment.initial_offset;
+            inner.create_segment(initial_offset)?;
         }
 
-        Ok(offset)
+        let current_segment_index = inner.current_segment_index.unwrap();
+
+        // Check if current segment is maxed and needs rotation.
+        if inner.segments[current_segment_index].is_maxed() {
+            let next_offset = inner.segments[current_segment_index].next_offset();
+            inner.create_segment(next_offset)?;
+        }
+
+        // Append to current segment.
+        let current_segment_index = inner.current_segment_index.unwrap();
+        inner.segments[current_segment_index].append(record)
     }
 
     pub fn read(&self, offset: u64) -> LogResult<Record> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.read();
 
         // Find the correct segment where the offset is present.
         // Note that the offset will be absolute here, not relative.
@@ -61,37 +70,43 @@ impl Log {
             .iter()
             .find(|s| s.contains(offset))
             .ok_or_else(|| LogError::InvalidOffsetError)?;
-        let record = segment.read(offset)?;
 
-        Ok(record)
+        segment.read(offset)
     }
 
     /// Get the lowest offset.
     pub fn get_lowest_offset(&self) -> u64 {
-        let inner = self.inner.lock().unwrap();
-        inner.segments[0].base_offset
+        let inner = self.inner.read();
+        if inner.segments.is_empty() {
+            return 0;
+        }
+        inner.segments[0].base_offset()
     }
 
     /// Get the highest offset.
     pub fn get_highest_offset(&self) -> u64 {
-        let inner = self.inner.lock().unwrap();
-        let offset = inner.segments[inner.segments.len() - 1].next_offset;
+        let inner = self.inner.read();
+        if inner.segments.is_empty() {
+            return 0;
+        }
+        let last_segment = &inner.segments[inner.segments.len() - 1];
+        let offset = last_segment.next_offset();
         if offset == 0 {
             return 0;
         }
-        return offset - 1;
+        offset - 1
     }
 
     /// Clean up all segments whose highest offset is lower than the cutoff offset.
     /// This function will be called periodically to free up disk space by removing
     /// old segments whose data has already been processed.
     pub fn cleanup(&self, cutoff_offset: u64) -> LogResult<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write();
 
         let segments = std::mem::take(&mut inner.segments);
         let mut segments_to_keep = Vec::with_capacity(segments.len());
         for segment in segments {
-            if segment.next_offset < cutoff_offset {
+            if segment.next_offset() < cutoff_offset {
                 segment.remove()?;
             } else {
                 segments_to_keep.push(segment);
@@ -99,11 +114,18 @@ impl Log {
         }
         inner.segments = segments_to_keep;
 
+        // Update current segment index.
+        if inner.segments.is_empty() {
+            inner.current_segment_index = None;
+        } else {
+            inner.current_segment_index = Some(inner.segments.len() - 1);
+        }
+
         Ok(())
     }
 
     pub fn close(&self) -> LogResult<()> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.read();
 
         for segment in &inner.segments {
             segment.close()?;
@@ -114,7 +136,7 @@ impl Log {
 
     pub fn remove(&self) -> LogResult<()> {
         let dir = {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.read();
             inner.dir.clone()
         };
 
@@ -131,7 +153,7 @@ impl Log {
     }
 
     fn setup(&self) -> LogResult<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write();
 
         let entries = std::fs::read_dir(&inner.dir)?;
         let mut base_offsets = Vec::new();
@@ -183,7 +205,7 @@ impl LogInner {
 mod tests {
     use super::*;
     use api::Record;
-    use cfg::{LogConfig, SegmentConfig};
+    use cfg::{DurabilityPolicy, LogConfig, SegmentConfig};
 
     #[test]
     fn test_log_append_and_read() -> LogResult<()> {
@@ -194,6 +216,7 @@ mod tests {
                     max_index_size: 1024,
                     initial_offset: 0,
                 },
+                durability: DurabilityPolicy::Never,
             },
         };
         let dir = tempfile::tempdir()?;
@@ -209,7 +232,7 @@ mod tests {
         };
 
         // Create a new segment.
-        let mut log = Log::new(dir.path(), config)?;
+        let log = Log::new(dir.path(), config)?;
 
         // Append the records.
         let offset = log.append(&record_1)?;

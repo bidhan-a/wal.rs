@@ -12,6 +12,21 @@ pub struct Config {
 pub struct LogConfig {
     /// Configuration for the segment.
     pub segment: SegmentConfig,
+    /// Durability policy for fsync operations.
+    pub durability: DurabilityPolicy,
+}
+
+/// Durability policy for controlling fsync behavior.
+#[derive(serde::Deserialize, Clone, Copy, Debug, PartialEq)]
+pub enum DurabilityPolicy {
+    /// Always fsync after each write.
+    Always,
+    /// Fsync at regular intervals (milliseconds).
+    Interval(u64),
+    /// Only fsync when rotating segments.
+    OnRotate,
+    /// Never fsync (for testing only).
+    Never,
 }
 
 /// The segment configuration.

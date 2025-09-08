@@ -1,8 +1,14 @@
 use byteorder::{BigEndian, WriteBytesExt};
+use cfg::DurabilityPolicy;
+use parking_lot::Mutex;
 use std::{
     fs::File,
-    io::{BufWriter, Read, Seek, SeekFrom, Write},
-    sync::{Arc, Mutex},
+    os::unix::fs::FileExt,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use crate::error::LogResult;
@@ -10,79 +16,99 @@ use crate::error::LogResult;
 const LEN_SIZE: usize = 8; // Size of the length prefix in bytes
 
 pub struct Store {
-    inner: Arc<Mutex<StoreInner>>,
-}
-
-struct StoreInner {
-    file: File,
-    buf: BufWriter<File>,
-    size: u64,
+    file: Arc<File>,
+    size: AtomicU64,
+    write_lock: Mutex<()>, // Minimal lock for write coordination
+    durability: DurabilityPolicy,
+    last_sync: Mutex<Instant>,
 }
 
 impl Store {
-    pub fn new(file: File) -> LogResult<Self> {
+    pub fn new(file: File, durability: DurabilityPolicy) -> LogResult<Self> {
         let metadata = file.metadata()?;
         let size = metadata.len();
 
-        let file_for_writer = file.try_clone()?;
-        let buf = BufWriter::new(file_for_writer);
-
         Ok(Self {
-            inner: Arc::new(Mutex::new(StoreInner { file, buf, size })),
+            file: Arc::new(file),
+            size: AtomicU64::new(size),
+            write_lock: Mutex::new(()),
+            durability,
+            last_sync: Mutex::new(Instant::now()),
         })
     }
 
     pub fn append(&self, data: &[u8]) -> LogResult<(u64, u64)> {
-        let mut inner = self.inner.lock().unwrap();
+        let _write_guard = self.write_lock.lock();
 
-        // The position where we'll begin writing from.
-        let pos = inner.size;
+        // Atomically allocate the write position.
+        let total_size = data.len() + LEN_SIZE;
+        let pos = self.size.fetch_add(total_size as u64, Ordering::AcqRel);
 
-        // Write the length of the data as the prefix.
-        inner.buf.write_u64::<BigEndian>(data.len() as u64)?;
+        // Prepare the write buffer with length prefix.
+        let mut write_buf = Vec::with_capacity(total_size);
+        write_buf.write_u64::<BigEndian>(data.len() as u64)?;
+        write_buf.extend_from_slice(data);
 
-        // Write the actual data.
-        let bytes_written = inner.buf.write(data)?;
+        // Write at the allocated position using positional I/O
+        self.file.write_all_at(&write_buf, pos)?;
 
-        let total_bytes_written = bytes_written + LEN_SIZE;
-        inner.size += total_bytes_written as u64;
+        // Handle durability policy
+        self.handle_durability()?;
 
-        Ok((total_bytes_written as u64, pos))
+        Ok((total_size as u64, pos))
     }
 
     pub fn read(&self, pos: u64) -> LogResult<Vec<u8>> {
-        let mut inner = self.inner.lock().unwrap();
-
-        // First, flush the buffer to make sure all data is written to the file.
-        inner.buf.flush()?;
-
-        // Read the length prefix.
+        // Read the length prefix using positional I/O
         let mut len_bytes = [0u8; LEN_SIZE];
-        inner.file.seek(SeekFrom::Start(pos))?;
-        inner.file.read_exact(&mut len_bytes)?;
+        self.file.read_exact_at(&mut len_bytes, pos)?;
 
-        // Convert BigEndian bytes to u64.
+        // Convert BigEndian bytes to u64
         let len = u64::from_be_bytes(len_bytes);
 
-        // Read the actual data.
+        // Read the actual data using positional I/O
         let mut data = vec![0u8; len as usize];
-        inner.file.read_exact(&mut data)?;
+        self.file.read_exact_at(&mut data, pos + LEN_SIZE as u64)?;
 
         Ok(data)
     }
 
     pub fn size(&self) -> u64 {
-        let inner = self.inner.lock().unwrap();
-        inner.size
+        self.size.load(Ordering::Acquire)
+    }
+
+    fn handle_durability(&self) -> LogResult<()> {
+        match self.durability {
+            DurabilityPolicy::Always => {
+                self.file.sync_all()?;
+            }
+            DurabilityPolicy::Interval(interval_ms) => {
+                let mut last_sync = self.last_sync.lock();
+                let now = Instant::now();
+                if now.duration_since(*last_sync) >= Duration::from_millis(interval_ms) {
+                    self.file.sync_all()?;
+                    *last_sync = now;
+                }
+            }
+            DurabilityPolicy::OnRotate | DurabilityPolicy::Never => {
+                // No sync needed.
+            }
+        }
+        Ok(())
+    }
+
+    pub fn sync(&self) -> LogResult<()> {
+        self.file.sync_all()?;
+        let mut last_sync = self.last_sync.lock();
+        *last_sync = Instant::now();
+        Ok(())
     }
 
     pub fn close(&self) -> LogResult<()> {
-        let mut inner = self.inner.lock().unwrap();
-
-        // Flush any remaining data in the buffer.
-        inner.buf.flush()?;
         // Sync the file to ensure all data is written to disk.
-        inner.file.sync_all()?;
+        if matches!(self.durability, DurabilityPolicy::OnRotate) {
+            self.file.sync_all()?;
+        }
         // File is automatically closed when dropped.
         Ok(())
     }
@@ -110,7 +136,7 @@ mod tests {
             .write(true)
             .open(temp_file.path())?;
 
-        let store = Store::new(file)?;
+        let store = Store::new(file, DurabilityPolicy::Never)?;
 
         // Append data to the store.
         let (bytes_written, pos) = store.append(TEST_DATA)?;

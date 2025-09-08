@@ -1,6 +1,10 @@
 use byteorder::{BigEndian, ByteOrder};
 use memmap2::{MmapMut, MmapOptions};
-use std::fs::File;
+use parking_lot::Mutex;
+use std::{
+    fs::File,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use crate::error::{LogError, LogResult};
 
@@ -11,7 +15,8 @@ const ENTRY_SIZE: usize = OFFSET_SIZE + POSITION_SIZE; // Size of each index ent
 pub struct Index {
     file: File,
     mmap: MmapMut,
-    size: u64,
+    size: AtomicU64,
+    write_lock: Mutex<()>, // Minimal lock for mmap write coordination
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,45 +40,55 @@ impl Index {
                 .map_mut(&file)?
         };
 
-        Ok(Self { file, mmap, size })
+        Ok(Self {
+            file,
+            mmap,
+            size: AtomicU64::new(size),
+            write_lock: Mutex::new(()),
+        })
     }
 
     pub fn write(&mut self, offset: u32, position: u64) -> LogResult<()> {
+        let _write_guard = self.write_lock.lock();
+
+        // Atomically allocate the entry position.
+        let current_size = self.size.load(Ordering::Acquire);
+
         // Check if the index is full.
-        if self.mmap.len() < (self.size as usize + ENTRY_SIZE) {
+        if self.mmap.len() < (current_size as usize + ENTRY_SIZE) {
             return Err(LogError::IndexFullError);
         }
 
-        // Get the start position for the new entry.
-        let start = self.size as usize;
+        let start = current_size as usize;
 
-        // Write the offset.
+        // Write the offset and position to mmap.
         BigEndian::write_u32(&mut self.mmap[start..start + OFFSET_SIZE], offset);
-
-        // Write the position.
         BigEndian::write_u64(
             &mut self.mmap[start + OFFSET_SIZE..start + ENTRY_SIZE],
             position,
         );
 
-        // Update the size.
-        self.size += ENTRY_SIZE as u64;
+        // Atomically update the size after successful write.
+        self.size
+            .store(current_size + ENTRY_SIZE as u64, Ordering::Release);
 
         Ok(())
     }
 
     pub fn read(&self, offset: Option<u32>) -> LogResult<IndexEntry> {
-        if self.size == 0 {
+        let current_size = self.size.load(Ordering::Acquire);
+
+        if current_size == 0 {
             return Err(LogError::IndexEmptyError);
         }
 
         let entry_offset = match offset {
             Some(o) => o,
-            None => ((self.size / ENTRY_SIZE as u64) - 1) as u32, // Get the offset of the last entry.
+            None => ((current_size / ENTRY_SIZE as u64) - 1) as u32, // Get the offset of the last entry.
         };
 
         let byte_pos = (entry_offset as u64) * ENTRY_SIZE as u64;
-        if self.size < byte_pos + ENTRY_SIZE as u64 {
+        if current_size < byte_pos + ENTRY_SIZE as u64 {
             return Err(LogError::IndexEntryOutOfBoundsError);
         }
 
@@ -95,7 +110,7 @@ impl Index {
     }
 
     pub fn size(&self) -> u64 {
-        self.size
+        self.size.load(Ordering::Acquire)
     }
 
     pub fn close(&self) -> LogResult<()> {
@@ -106,7 +121,8 @@ impl Index {
         self.file.sync_all()?;
 
         // Truncate the file to the used size.
-        self.file.set_len(self.size)?;
+        let current_size = self.size.load(Ordering::Acquire);
+        self.file.set_len(current_size)?;
 
         Ok(())
     }

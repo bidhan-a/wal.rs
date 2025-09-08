@@ -12,6 +12,8 @@ pub enum LogError {
     InvalidOffsetError,
     #[error("The record is invalid")]
     InvalidRecordError,
+    #[error("Writer error: {0}")]
+    WriterError(String),
     #[error("IO error: {0}")]
     IOError(#[from] std::io::Error),
 }
