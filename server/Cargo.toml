@@ -10,3 +10,5 @@ log = { path = "../log" }
 thiserror = "2.0.12"
 tokio = { version = "1.47.1", features = ["full"] }
 tonic = "0.13.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
