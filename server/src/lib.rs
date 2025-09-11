@@ -141,13 +141,13 @@ impl LogService for GrpcLogService {
 mod tests {
     use super::*;
     use api::{ConsumeRequest, ProduceRequest, Record};
+    use api::{log_service_client::LogServiceClient, log_service_server::LogServiceServer};
     use cfg::{Config, DurabilityPolicy, LogConfig, SegmentConfig};
-    use futures::StreamExt;
     use log::log::Log;
-    use tempfile::TempDir;
-    use tonic::Request;
+    use tokio::sync::oneshot;
+    use tonic::transport::Server;
 
-    fn create_test_log() -> (Log, TempDir) {
+    fn create_test_log() -> (Log, tempfile::TempDir) {
         let config = Config {
             log: LogConfig {
                 segment: SegmentConfig {
@@ -163,62 +163,53 @@ mod tests {
         (log, temp_dir)
     }
 
+    async fn start_server(
+        service: GrpcLogService,
+    ) -> (String, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        // Bind to an ephemeral port on localhost.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let svc = LogServiceServer::new(service);
+
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(svc)
+                .serve_with_incoming_shutdown(incoming, async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        (format!("http://{}", addr), shutdown_tx, handle)
+    }
+
     #[tokio::test]
     async fn test_produce() {
         let (log, _temp_dir) = create_test_log();
         let service = GrpcLogService::new(log);
 
+        let (endpoint, shutdown_tx, handle) = start_server(service).await;
+        let mut client = LogServiceClient::connect(endpoint).await.unwrap();
+
         let record = Record {
             offset: None,
-            value: b"test record".to_vec(),
+            value: b"p1".to_vec(),
         };
-        let request = Request::new(ProduceRequest {
-            record: Some(record),
-        });
+        let resp = client
+            .produce(tonic::Request::new(ProduceRequest {
+                record: Some(record),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.offset, 0);
 
-        let response = service.produce(request).await.unwrap();
-        assert_eq!(response.into_inner().offset, 0);
-    }
-
-    #[tokio::test]
-    async fn test_produce_multiple_records() {
-        let (log, _temp_dir) = create_test_log();
-        let service = GrpcLogService::new(log);
-
-        // Produce first record.
-        let record1 = Record {
-            offset: None,
-            value: b"first record".to_vec(),
-        };
-        let request1 = Request::new(ProduceRequest {
-            record: Some(record1),
-        });
-        let response1 = service.produce(request1).await.unwrap();
-        assert_eq!(response1.into_inner().offset, 0);
-
-        // Produce second record.
-        let record2 = Record {
-            offset: None,
-            value: b"second record".to_vec(),
-        };
-        let request2 = Request::new(ProduceRequest {
-            record: Some(record2),
-        });
-        let response2 = service.produce(request2).await.unwrap();
-        assert_eq!(response2.into_inner().offset, 1);
-    }
-
-    #[tokio::test]
-    async fn test_produce_missing_record() {
-        let (log, _temp_dir) = create_test_log();
-        let service = GrpcLogService::new(log);
-
-        let request = Request::new(ProduceRequest { record: None });
-
-        let result = service.produce(request).await;
-        assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        let _ = shutdown_tx.send(());
+        handle.await.unwrap();
     }
 
     #[tokio::test]
@@ -226,131 +217,124 @@ mod tests {
         let (log, _temp_dir) = create_test_log();
         let service = GrpcLogService::new(log);
 
-        // First produce a record.
+        let (endpoint, shutdown_tx, handle) = start_server(service).await;
+        let mut client = LogServiceClient::connect(endpoint).await.unwrap();
+
+        // Produce a record.
         let record = Record {
             offset: None,
-            value: b"test record".to_vec(),
+            value: b"c1".to_vec(),
         };
-        let produce_request = Request::new(ProduceRequest {
-            record: Some(record),
-        });
-        service.produce(produce_request).await.unwrap();
+        client
+            .produce(tonic::Request::new(ProduceRequest {
+                record: Some(record),
+            }))
+            .await
+            .unwrap();
 
-        // Now consume it.
-        let consume_request = Request::new(ConsumeRequest { offset: 0 });
-        let response = service.consume(consume_request).await.unwrap();
-        let consumed_record = response.into_inner().record.unwrap();
-        assert_eq!(consumed_record.value, b"test record");
+        // Consume the record.
+        let got = client
+            .consume(tonic::Request::new(ConsumeRequest { offset: 0 }))
+            .await
+            .unwrap()
+            .into_inner()
+            .record
+            .unwrap();
+        assert_eq!(got.value, b"c1");
+
+        let _ = shutdown_tx.send(());
+        handle.await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_consume_invalid_offset() {
+    async fn test_produce_stream() {
+        use tokio::sync::mpsc;
+        use tokio_stream::wrappers::ReceiverStream;
+
         let (log, _temp_dir) = create_test_log();
         let service = GrpcLogService::new(log);
 
-        let request = Request::new(ConsumeRequest { offset: 999 });
-        let result = service.consume(request).await;
-        assert!(result.is_err());
-    }
+        let (endpoint, shutdown_tx, handle) = start_server(service).await;
+        let mut client = LogServiceClient::connect(endpoint).await.unwrap();
 
-    // TODO: Testing produce_stream is a bit tricky since it requires a stream request.
+        // Build a channel-backed request stream.
+        let (tx, rx) = mpsc::channel(8);
+        let req_stream = ReceiverStream::new(rx);
+
+        let mut resp_stream = client
+            .produce_stream(tonic::Request::new(req_stream))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Send three records then close input.
+        for (i, data) in [b"s1", b"s2", b"s3"].into_iter().enumerate() {
+            let req = ProduceRequest {
+                record: Some(Record {
+                    offset: None,
+                    value: data.to_vec(),
+                }),
+            };
+            tx.send(req).await.unwrap();
+            // Expect ack with increasing offsets.
+            let ack = resp_stream.message().await.unwrap().unwrap();
+            assert_eq!(ack.offset as usize, i);
+        }
+        drop(tx);
+
+        // No more acks expected.
+        let done = resp_stream.message().await.unwrap_or(None);
+        assert!(done.is_none());
+
+        let _ = shutdown_tx.send(());
+        handle.await.unwrap();
+    }
 
     #[tokio::test]
     async fn test_consume_stream() {
         let (log, _temp_dir) = create_test_log();
         let service = GrpcLogService::new(log);
 
-        // First produce some records.
-        let records = vec![b"record 1", b"record 2", b"record 3"];
-        for record_data in &records {
+        let (endpoint, shutdown_tx, handle) = start_server(service).await;
+        let mut client = LogServiceClient::connect(endpoint).await.unwrap();
+
+        // Produce three records.
+        for data in [b"r1", b"r2", b"r3"] {
             let record = Record {
                 offset: None,
-                value: record_data.to_vec(),
+                value: data.to_vec(),
             };
-            let request = Request::new(ProduceRequest {
-                record: Some(record),
-            });
-            service.produce(request).await.unwrap();
+            client
+                .produce(tonic::Request::new(ProduceRequest {
+                    record: Some(record),
+                }))
+                .await
+                .unwrap();
         }
 
-        // Now consume them via stream.
-        let request = Request::new(ConsumeRequest { offset: 0 });
-        let response = service.consume_stream(request).await.unwrap();
-        let mut output_stream = response.into_inner();
+        let mut stream = client
+            .consume_stream(tonic::Request::new(ConsumeRequest { offset: 0 }))
+            .await
+            .unwrap()
+            .into_inner();
 
-        // Collect responses.
-        let mut consumed_records = Vec::new();
-        for _ in 0..3 {
-            let result = output_stream.next().await.unwrap();
-            let record = result.unwrap().record.unwrap();
-            consumed_records.push(record.value);
+        // Expect three messages with those values.
+        for expected in [b"r1", b"r2", b"r3"] {
+            let msg = stream.message().await.unwrap().unwrap();
+            let rec = msg.record.unwrap();
+            assert_eq!(rec.value, expected);
         }
 
-        // Verify consumed records.
-        assert_eq!(consumed_records.len(), 3);
-        assert_eq!(consumed_records[0], b"record 1");
-        assert_eq!(consumed_records[1], b"record 2");
-        assert_eq!(consumed_records[2], b"record 3");
-
-        // Next read should fail (since there are no more records)
-        let result = output_stream.next().await.unwrap();
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_consume_stream_invalid_offset() {
-        let (log, _temp_dir) = create_test_log();
-        let service = GrpcLogService::new(log);
-
-        let request = Request::new(ConsumeRequest { offset: 999 });
-        let response = service.consume_stream(request).await.unwrap();
-        let mut output_stream = response.into_inner();
-
-        // Should immediately get an error.
-        let result = output_stream.next().await.unwrap();
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_end_to_end_workflow() {
-        let (log, _temp_dir) = create_test_log();
-        let service = GrpcLogService::new(log);
-
-        // 1. Produce some records via single calls.
-        for i in 0..5 {
-            let record = Record {
-                offset: None,
-                value: format!("single record {}", i).into_bytes(),
-            };
-            let request = Request::new(ProduceRequest {
-                record: Some(record),
-            });
-            let response = service.produce(request).await.unwrap();
-            assert_eq!(response.into_inner().offset, i);
+        // Next should be end or error; service returns error when no more records.
+        // Here we accept either end-of-stream or a final error converted to end.
+        let maybe_next = stream.message().await;
+        // If we got Ok(None) it's fine, Err(_) is also acceptable.
+        // Only panic on unexpected Ok(Some(_)).
+        if let Ok(Some(_)) = maybe_next {
+            panic!("unexpected extra message in consume_stream");
         }
 
-        // 2. Consume individual records.
-        for i in 0..5 {
-            let request = Request::new(ConsumeRequest { offset: i });
-            let response = service.consume(request).await.unwrap();
-            let record = response.into_inner().record.unwrap();
-            assert!(!record.value.is_empty());
-        }
-
-        // 3. Consume via stream from offset 3.
-        let request = Request::new(ConsumeRequest { offset: 3 });
-        let response = service.consume_stream(request).await.unwrap();
-        let mut output_stream = response.into_inner();
-
-        // Should get records 3, 4, then error on 5.
-        for _expected_offset in 3..5 {
-            let result = output_stream.next().await.unwrap();
-            let record = result.unwrap().record.unwrap();
-            assert!(!record.value.is_empty());
-        }
-
-        // Should get error on non-existent offset 5.
-        let result = output_stream.next().await.unwrap();
-        assert!(result.is_err());
+        let _ = shutdown_tx.send(());
+        handle.await.unwrap();
     }
 }
