@@ -10,8 +10,10 @@ pub struct Config {
 /// The TLS configuration.
 #[derive(serde::Deserialize, Clone)]
 pub struct TLSConfig {
-    pub cert_file: String,
-    pub key_file: String,
+    pub server_cert_file: String,
+    pub server_key_file: String,
+    pub client_cert_file: String,
+    pub client_key_file: String,
     pub ca_file: String,
 }
 

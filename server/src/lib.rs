@@ -160,17 +160,23 @@ mod tests {
 
     fn get_tls_config() -> TLSConfig {
         let cert_dir = get_certs_dir();
+        let server_cert_path = cert_dir.join("server.pem");
+        let server_key_path = cert_dir.join("server-key.pem");
+        let client_cert_path = cert_dir.join("client.pem");
+        let client_key_path = cert_dir.join("client-key.pem");
         let ca_path = cert_dir.join("ca.pem");
-        let cert_path = cert_dir.join("server.pem");
-        let key_path = cert_dir.join("server-key.pem");
 
-        let cert_file = std::fs::read_to_string(cert_path).unwrap();
-        let key_file = std::fs::read_to_string(key_path).unwrap();
+        let server_cert_file = std::fs::read_to_string(server_cert_path).unwrap();
+        let server_key_file = std::fs::read_to_string(server_key_path).unwrap();
+        let client_cert_file = std::fs::read_to_string(client_cert_path).unwrap();
+        let client_key_file = std::fs::read_to_string(client_key_path).unwrap();
         let ca_file = std::fs::read_to_string(ca_path).unwrap();
 
         return TLSConfig {
-            cert_file,
-            key_file,
+            server_cert_file,
+            server_key_file,
+            client_cert_file,
+            client_key_file,
             ca_file,
         };
     }
@@ -178,12 +184,12 @@ mod tests {
     async fn create_tls_client(endpoint: String) -> LogServiceClient<tonic::transport::Channel> {
         // Setup client TLS
         let tls_config = get_tls_config();
-        // let client_identity = Identity::from_pem(tls_config.cert_file, tls_config.key_file);
         let ca_cert = Certificate::from_pem(tls_config.ca_file);
-
+        let client_identity =
+            Identity::from_pem(tls_config.client_cert_file, tls_config.client_key_file);
         let tls = ClientTlsConfig::new()
             .domain_name("localhost")
-            // .identity(client_identity)
+            .identity(client_identity)
             .ca_certificate(ca_cert);
         let channel = Channel::from_shared(endpoint)
             .unwrap()
@@ -220,11 +226,12 @@ mod tests {
         // Setup TLS.
 
         let tls_config = get_tls_config();
-        let server_identity = Identity::from_pem(tls_config.cert_file, tls_config.key_file);
+        let server_identity =
+            Identity::from_pem(tls_config.server_cert_file, tls_config.server_key_file);
         let client_ca_cert = Certificate::from_pem(tls_config.ca_file);
         let tls = ServerTlsConfig::new()
             .identity(server_identity)
-            .client_auth_optional(true)
+            .client_auth_optional(false)
             .client_ca_root(client_ca_cert);
 
         // Bind to an ephemeral port on localhost.
