@@ -7,6 +7,14 @@ pub struct Config {
     pub log: LogConfig,
 }
 
+/// The TLS configuration.
+#[derive(serde::Deserialize, Clone)]
+pub struct TLSConfig {
+    pub cert_file: String,
+    pub key_file: String,
+    pub ca_file: String,
+}
+
 /// The log configuration.
 #[derive(serde::Deserialize, Clone, Copy)]
 pub struct LogConfig {

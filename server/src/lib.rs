@@ -142,10 +142,58 @@ mod tests {
     use super::*;
     use api::{ConsumeRequest, ProduceRequest, Record};
     use api::{log_service_client::LogServiceClient, log_service_server::LogServiceServer};
-    use cfg::{Config, DurabilityPolicy, LogConfig, SegmentConfig};
+    use cfg::{Config, DurabilityPolicy, LogConfig, SegmentConfig, TLSConfig};
     use log::log::Log;
+    use rustls::crypto::ring::default_provider;
+    use std::env;
+    use std::path::PathBuf;
     use tokio::sync::oneshot;
-    use tonic::transport::Server;
+    use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
+    use tonic::transport::{Server, ServerTlsConfig};
+
+    fn get_certs_dir() -> PathBuf {
+        let home = env::var("HOME").unwrap_or_else(|_| String::from("."));
+        let mut p = PathBuf::from(home);
+        p.push(".walrs");
+        p
+    }
+
+    fn get_tls_config() -> TLSConfig {
+        let cert_dir = get_certs_dir();
+        let ca_path = cert_dir.join("ca.pem");
+        let cert_path = cert_dir.join("server.pem");
+        let key_path = cert_dir.join("server-key.pem");
+
+        let cert_file = std::fs::read_to_string(cert_path).unwrap();
+        let key_file = std::fs::read_to_string(key_path).unwrap();
+        let ca_file = std::fs::read_to_string(ca_path).unwrap();
+
+        return TLSConfig {
+            cert_file,
+            key_file,
+            ca_file,
+        };
+    }
+
+    async fn create_tls_client(endpoint: String) -> LogServiceClient<tonic::transport::Channel> {
+        // Setup client TLS
+        let tls_config = get_tls_config();
+        // let client_identity = Identity::from_pem(tls_config.cert_file, tls_config.key_file);
+        let ca_cert = Certificate::from_pem(tls_config.ca_file);
+
+        let tls = ClientTlsConfig::new()
+            .domain_name("localhost")
+            // .identity(client_identity)
+            .ca_certificate(ca_cert);
+        let channel = Channel::from_shared(endpoint)
+            .unwrap()
+            .tls_config(tls)
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        LogServiceClient::new(channel)
+    }
 
     fn create_test_log() -> (Log, tempfile::TempDir) {
         let config = Config {
@@ -166,6 +214,19 @@ mod tests {
     async fn start_server(
         service: GrpcLogService,
     ) -> (String, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        // Initialize crypto provider (only once per process)
+        let _ = rustls::crypto::CryptoProvider::install_default(default_provider());
+
+        // Setup TLS.
+
+        let tls_config = get_tls_config();
+        let server_identity = Identity::from_pem(tls_config.cert_file, tls_config.key_file);
+        let client_ca_cert = Certificate::from_pem(tls_config.ca_file);
+        let tls = ServerTlsConfig::new()
+            .identity(server_identity)
+            .client_auth_optional(true)
+            .client_ca_root(client_ca_cert);
+
         // Bind to an ephemeral port on localhost.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -176,6 +237,8 @@ mod tests {
 
         let handle = tokio::spawn(async move {
             Server::builder()
+                .tls_config(tls)
+                .unwrap()
                 .add_service(svc)
                 .serve_with_incoming_shutdown(incoming, async move {
                     let _ = shutdown_rx.await;
@@ -184,7 +247,7 @@ mod tests {
                 .unwrap();
         });
 
-        (format!("http://{}", addr), shutdown_tx, handle)
+        (format!("https://{}", addr), shutdown_tx, handle)
     }
 
     #[tokio::test]
@@ -193,7 +256,7 @@ mod tests {
         let service = GrpcLogService::new(log);
 
         let (endpoint, shutdown_tx, handle) = start_server(service).await;
-        let mut client = LogServiceClient::connect(endpoint).await.unwrap();
+        let mut client = create_tls_client(endpoint).await;
 
         let record = Record {
             offset: None,
@@ -218,7 +281,7 @@ mod tests {
         let service = GrpcLogService::new(log);
 
         let (endpoint, shutdown_tx, handle) = start_server(service).await;
-        let mut client = LogServiceClient::connect(endpoint).await.unwrap();
+        let mut client = create_tls_client(endpoint).await;
 
         // Produce a record.
         let record = Record {
@@ -255,7 +318,7 @@ mod tests {
         let service = GrpcLogService::new(log);
 
         let (endpoint, shutdown_tx, handle) = start_server(service).await;
-        let mut client = LogServiceClient::connect(endpoint).await.unwrap();
+        let mut client = create_tls_client(endpoint).await;
 
         // Build a channel-backed request stream.
         let (tx, rx) = mpsc::channel(8);
@@ -296,7 +359,7 @@ mod tests {
         let service = GrpcLogService::new(log);
 
         let (endpoint, shutdown_tx, handle) = start_server(service).await;
-        let mut client = LogServiceClient::connect(endpoint).await.unwrap();
+        let mut client = create_tls_client(endpoint).await;
 
         // Produce three records.
         for data in [b"r1", b"r2", b"r3"] {
