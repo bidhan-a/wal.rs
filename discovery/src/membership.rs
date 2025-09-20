@@ -19,12 +19,11 @@ type MembershipDelegate = CompositeDelegate<NodeId, SocketAddr>;
 
 enum Event {
     Register {
-        name: SmolStr,
-        addr: SocketAddr,
+        config: Config,
         tx: oneshot::Sender<Result<()>>,
     },
     List {
-        tx: oneshot::Sender<Result<Vec<Service>>>,
+        tx: oneshot::Sender<Result<Vec<Config>>>,
     },
     Join {
         addr: SocketAddr,
@@ -34,25 +33,6 @@ enum Event {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct Service {
-    name: SmolStr,
-    addr: SocketAddr,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MemberStatus {
-    Alive,
-    Left,
-}
-
-#[derive(Clone, Debug)]
-pub struct Member {
-    pub name: SmolStr,
-    pub addr: SocketAddr,
-    pub status: MemberStatus,
-}
-
-#[derive(Clone)]
 pub struct Config {
     pub node_name: SmolStr,
     pub bind_addr: SocketAddr,
@@ -78,11 +58,10 @@ impl Handler for NoopHandler {
 
 struct Inner {
     serf: TokioTcpSerf<NodeId, TokioSocketAddrResolver, MembershipDelegate>,
-    services: SkipMap<SmolStr, Service>,
+    members: SkipMap<SmolStr, Config>,
     tx: UnboundedSender<Event>,
     config: Config,
     handler: Arc<dyn Handler>,
-    members: SkipMap<SmolStr, Member>,
 }
 
 #[derive(Clone)]
@@ -113,11 +92,10 @@ impl Membership {
         let this = Self {
             inner: Inner {
                 serf,
-                services: SkipMap::new(),
+                members: SkipMap::new(),
                 tx,
                 config: default_config,
                 handler: noop_handler,
-                members: SkipMap::new(),
             }
             .into(),
         };
@@ -144,11 +122,10 @@ impl Membership {
         let this = Self {
             inner: Inner {
                 serf,
-                services: SkipMap::new(),
+                members: SkipMap::new(),
                 tx,
                 config: config.clone(),
                 handler,
-                members: SkipMap::new(),
             }
             .into(),
         };
@@ -157,8 +134,7 @@ impl Membership {
         this.clone().handle_internal_events(rx);
 
         // announce ourselves.
-        this.register(config.node_name.clone(), config.rpc_addr)
-            .await?;
+        this.register(config.clone()).await?;
         // start joins.
         for addr in &this.inner.config.start_join_addrs {
             let id = NodeId::new(addr.to_string())?;
@@ -167,16 +143,16 @@ impl Membership {
         Ok(this)
     }
 
-    pub async fn register(&self, name: SmolStr, addr: SocketAddr) -> Result<()> {
+    pub async fn register(&self, config: Config) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        if let Err(e) = self.inner.tx.send(Event::Register { name, addr, tx }) {
+        if let Err(e) = self.inner.tx.send(Event::Register { config, tx }) {
             return Err(Box::new(e));
         }
         rx.await??;
         Ok(())
     }
 
-    pub async fn list(&self) -> Result<Vec<Service>> {
+    pub async fn list(&self) -> Result<Vec<Config>> {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self.inner.tx.send(Event::List { tx }) {
             return Err(Box::new(e));
@@ -197,12 +173,16 @@ impl Membership {
         self.inner.config.node_name.as_str() == name
     }
 
-    pub fn members(&self) -> Vec<Member> {
+    pub fn members(&self) -> Vec<Config> {
         self.inner
             .members
             .iter()
             .map(|e| e.value().clone())
             .collect()
+    }
+
+    pub fn member_count(&self) -> usize {
+        self.inner.members.len()
     }
 
     pub async fn leave(&self) -> Result<()> {
@@ -225,9 +205,8 @@ impl Membership {
                     }
                     ev = rx.recv() => {
                         match ev {
-                            Some(Event::Register { name, addr, tx }) => {
-                                let service = Service { name: name.clone(), addr };
-                                match serialize(&service) {
+                            Some(Event::Register { config, tx }) => {
+                                match serialize(&config) {
                                     Ok(data) => {
                                         match self.inner.serf.user_event("register", data, false).await {
                                             Ok(_) => { let _ = tx.send(Ok(())); }
@@ -243,12 +222,11 @@ impl Membership {
                                     }
                                 }
                                 // update local maps immediately.
-                                self.inner.services.insert(service.name.clone(), service);
-                                self.inner.members.insert(name.clone(), Member { name, addr, status: MemberStatus::Alive });
+                                self.inner.members.insert(config.node_name.clone(), config);
                             }
                             Some(Event::List { tx }) => {
-                                let services = self.inner.services.iter().map(|ent| ent.value().clone()).collect();
-                                let _ = tx.send(Ok(services));
+                                let members = self.inner.members.iter().map(|ent| ent.value().clone()).collect();
+                                let _ = tx.send(Ok(members));
                             }
                             Some(Event::Join { id, addr, tx }) => {
                                 let res = self.inner.serf.join(Node::new(id, MaybeResolvedAddress::Resolved(addr)), false).await;
@@ -282,29 +260,20 @@ impl Membership {
                                 match ev.name().as_str() {
                                     "register" => {
                                         let payload = ev.payload();
-                                        let service: Service = match deserialize(payload) {
-                                            Ok(service) => service,
+                                        let config: Config = match deserialize(payload) {
+                                            Ok(config) => config,
                                             Err(e) => {
                                                 tracing::error!(err=%e, "membership: failed to decode register event");
                                                 continue;
                                             }
                                         };
-                                        if service.name != self.inner.config.node_name {
-                                            let _ = self.inner.handler.join(&service.name, &service.addr.to_string());
+                                        if config.node_name != self.inner.config.node_name {
+                                            let _ = self.inner.handler.join(&config.node_name, &config.rpc_addr.to_string());
                                         }
-                                        self.inner.services.insert(service.name.clone(), service.clone());
-                                        self.inner.members.insert(service.name.clone(), Member { name: service.name, addr: service.addr, status: MemberStatus::Alive });
+                                        self.inner.members.insert(config.node_name.clone(), config.clone());
                                     }
                                     "deregister" => {
                                         if let Ok(addr) = deserialize::<SocketAddr>(ev.payload()) {
-                                            // mark members with this addr as Left.
-                                            let keys: Vec<SmolStr> = self.inner.members.iter().filter(|e| e.value().addr == addr).map(|e| e.key().clone()).collect();
-                                            for k in keys {
-                                                if let Some(mut entry) = self.inner.members.get(&k) {
-                                                    let m = entry.value().clone();
-                                                    self.inner.members.insert(k.clone(), Member { status: MemberStatus::Left, ..m });
-                                                }
-                                            }
                                             Self::remove_services_by_addr(&self, addr);
                                         }
                                     }
@@ -324,14 +293,112 @@ impl Membership {
     fn remove_services_by_addr(&self, addr: SocketAddr) {
         let keys: Vec<SmolStr> = self
             .inner
-            .services
+            .members
             .iter()
-            .filter(|ent| ent.value().addr == addr)
+            .filter(|ent| ent.value().rpc_addr == addr)
             .map(|ent| ent.key().clone())
             .collect();
         for key in keys {
-            let _ = self.inner.services.remove(&key);
+            let _ = self.inner.members.remove(&key);
             let _ = self.inner.handler.leave(key.as_str());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::runtime::Builder;
+    use tokio::time::{Duration, Instant, sleep};
+
+    struct TestHandler {
+        joins: tokio::sync::mpsc::UnboundedSender<(String, String)>,
+        leaves: tokio::sync::mpsc::UnboundedSender<String>,
+    }
+
+    impl Handler for TestHandler {
+        fn join(&self, name: &str, addr: &str) -> Result<()> {
+            let _ = self.joins.send((name.to_string(), addr.to_string()));
+            Ok(())
+        }
+        fn leave(&self, name: &str) -> Result<()> {
+            let _ = self.leaves.send(name.to_string());
+            Ok(())
+        }
+    }
+
+    async fn start_member_with(
+        bind: SocketAddr,
+        start_join: Vec<SocketAddr>,
+        joins_tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
+        leaves_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Membership {
+        let handler = Arc::new(TestHandler {
+            joins: joins_tx,
+            leaves: leaves_tx,
+        });
+        let cfg = Config {
+            node_name: SmolStr::from(format!("{}", bind)),
+            bind_addr: bind,
+            rpc_addr: bind,
+            tags: HashMap::new(),
+            start_join_addrs: start_join,
+        };
+        Membership::with_config(handler, cfg).await.unwrap()
+    }
+
+    #[test]
+    fn test_membership() {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (jt, jr) = tokio::sync::mpsc::unbounded_channel();
+            let (lt, mut lr) = tokio::sync::mpsc::unbounded_channel();
+
+            let ports = [53131, 53132, 53133];
+            let addrs: Vec<SocketAddr> = ports
+                .iter()
+                .map(|p| format!("127.0.0.1:{}", p).parse().unwrap())
+                .collect();
+
+            let m0 = start_member_with(addrs[0], vec![], jt.clone(), lt.clone()).await;
+            let _m1 = start_member_with(addrs[1], vec![addrs[0]], jt.clone(), lt.clone()).await;
+            let m2 = start_member_with(addrs[2], vec![addrs[0]], jt.clone(), lt.clone()).await;
+
+            let start = Instant::now();
+            loop {
+                let joins_ok = jr.len() >= 2;
+                let mem_ok = m0.member_count() == 3;
+                let leaves_ok = lr.len() == 0;
+                if joins_ok && mem_ok && leaves_ok {
+                    break;
+                }
+                if start.elapsed() > Duration::from_secs(3) {
+                    panic!("initial membership not reached");
+                }
+                sleep(Duration::from_millis(250)).await;
+            }
+
+            m2.leave().await.unwrap();
+
+            // Give some time for the leave event to propagate.
+            sleep(Duration::from_millis(100)).await;
+
+            let start = Instant::now();
+            loop {
+                let joins_ok = jr.len() >= 2;
+                let mem_ok = m0.member_count() == 3;
+                let leaves_ok = lr.len() >= 1;
+                if joins_ok && mem_ok && leaves_ok {
+                    break;
+                }
+                if start.elapsed() > Duration::from_secs(5) {
+                    panic!("leave not observed in time");
+                }
+                sleep(Duration::from_millis(250)).await;
+            }
+
+            let left_name = lr.recv().await.unwrap();
+            assert_eq!(left_name, format!("{}", addrs[2]));
+        });
     }
 }
