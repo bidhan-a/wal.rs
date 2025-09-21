@@ -1977,6 +1977,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.16",
  "tokio",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]

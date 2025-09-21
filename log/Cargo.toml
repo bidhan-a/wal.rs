@@ -13,6 +13,8 @@ cfg = { path = "../cfg" }
 parking_lot = "0.12"
 tokio = { version = "1.0", features = ["sync", "rt"] }
 crossbeam-channel = "0.5"
+tonic = "0.13"
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3.20.0"

@@ -16,6 +16,12 @@ pub enum LogError {
     WriterError(String),
     #[error("IO error: {0}")]
     IOError(#[from] std::io::Error),
+    #[error("Replication error: {0}")]
+    ReplicationError(String),
+    #[error("gRPC error: {0}")]
+    GrpcError(#[from] tonic::Status),
+    #[error("Transport error: {0}")]
+    TransportError(#[from] tonic::transport::Error),
 }
 
 pub type LogResult<T> = Result<T, LogError>;
