@@ -1,0 +1,15 @@
+[package]
+name = "agent"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+api = { path = "../api" }
+log = { path = "../log" }
+discovery = { path = "../discovery" }
+server = { path = "../server" }
+cfg = { path = "../cfg" }
+tokio = { version = "1.0", features = ["sync", "rt", "net", "signal"] }
+tonic = "0.13"
+tracing = "0.1"
+thiserror = "2.0.12"

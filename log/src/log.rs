@@ -12,6 +12,7 @@ use crate::{
     segment::Segment,
 };
 
+#[derive(Clone)]
 pub struct Log {
     inner: Arc<RwLock<LogInner>>,
 }
